@@ -1,9 +1,10 @@
 # Envoy AI Gateway v0.4 → v0.5 마이그레이션 가이드
-## + LLM 대화 메모리 PoC (Option B) 구현
+## + LLM 대화 메모리 PoC (통합 아키텍처) 구현
 
 > **작성일:** 2026-04-26  
+> **최종 수정:** 2026-04-27 (통합 아키텍처 반영)  
 > **검증 환경:** Windows 11 Pro, Docker Desktop (WSL2), Kind v1.32  
-> **구현 방식:** Option B — Body Mutation + External Memory Service
+> **구현 방식:** 통합 — ExtProc 서버사이드 메모리 + Body Mutation + 토큰 레이트 리밋
 
 ---
 
@@ -16,6 +17,10 @@
 5. [메모리 PoC 아키텍처 및 구현](#5-메모리-poc-아키텍처-및-구현)
 6. [동작 검증 결과](#6-동작-검증-결과)
 7. [운영 체크리스트](#7-운영-체크리스트)
+
+> **아키텍처 변경 이력**  
+> - v1 (2026-04-26): Option B (클라이언트 사이드 메모리 + Body Mutation)  
+> - v2 (2026-04-27): 통합 — Option A ExtProc (서버사이드 투명 메모리) + Option B 기능 통합
 
 ---
 
@@ -483,29 +488,240 @@ Redis가 준비되기 전에 Envoy Gateway를 설치하면 rate limit 서비스�
 
 ---
 
+### 문제 8: ExtProc 이미지 빌드 — Envoy proto 컴파일 의존성
+
+**증상**  
+팀원 레포의 Dockerfile이 `COPY envoy/api /app/envoy/api`를 하지만, 해당 디렉토리가 `.gitignore`에 포함되어 레포에 없음:
+```
+error: failed to solve: failed to read dockerfile: ...
+COPY failed: file not found in build context: envoy/api
+```
+
+**원인**  
+Envoy ExtProc gRPC를 Python에서 사용하려면 `external_processor_pb2.py` 등 컴파일된 protobuf 파일이 필요하며, 이는 envoy 소스 레포에서 `grpcio-tools.protoc`로 생성해야 합니다.  
+팀원은 빌드 전에 별도로 `git clone envoy` 후 생성하는 로컬 사전 단계가 있었음.
+
+**해결**  
+Dockerfile을 멀티스테이지 빌드로 교체 — 빌드 컨텍스트에 대한 사전 단계 불필요:
+```dockerfile
+FROM python:3.12-slim AS proto-builder
+RUN apt-get install -y git && pip install grpcio-tools==1.80.0
+# 3개 레포 sparse clone: envoyproxy/envoy, cncf/xds, bufbuild/protoc-gen-validate
+RUN git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/envoyproxy/envoy.git /envoy && \
+    cd /envoy && git sparse-checkout set api
+# ... (xds, pgv 동일)
+RUN find /envoy/api /xds/udpa /pgv/validate -name "*.proto" | \
+    xargs python -m grpc_tools.protoc \
+        -I /envoy/api -I /xds -I /pgv \
+        --python_out=/pb --grpc_python_out=/pb
+
+FROM python:3.12-slim
+COPY --from=proto-builder /pb/ /app/proto/
+ENV PYTHONPATH=/app/proto
+```
+
+> ⚠️ **3개 레포를 클론해야 하는 이유**: `external_processor.proto`의 transitive import가  
+> `udpa/annotations/status.proto` (cncf/xds 레포)와 `validate/validate.proto` (bufbuild 레포)를 포함.  
+> `grpcio-tools`는 google/protobuf 만 자동 제공, 나머지는 별도 `-I` 경로 지정 필요.
+
+---
+
+### 문제 9: Redis 키 형식 불일치 (Memory Service vs ExtProc)
+
+**증상**  
+ExtProc과 Memory Service REST API가 같은 Redis 인스턴스를 쓰지만 키가 달라  
+`/history` 슬래시 명령어로 조회 시 ExtProc이 저장한 데이터가 보이지 않음.
+
+| 구현 | 키 형식 |
+|------|---------|
+| Memory Service (본인) | `memory:session:{session_id}` |
+| ExtProc (팀원) | `chat:{session_id}` |
+
+**해결**  
+`extproc/server.py`의 키 형식을 Memory Service와 통일:
+```python
+# 변경 전 (팀원 코드)
+r.get(f"chat:{session_id}")
+r.setex(f"chat:{session_id}", ...)
+
+# 변경 후 (통합)
+REDIS_KEY_PREFIX = "memory:session"
+r.get(f"{REDIS_KEY_PREFIX}:{session_id}")
+r.setex(f"{REDIS_KEY_PREFIX}:{session_id}", ...)
+```
+
+단위 테스트(`tests/unit/test_processor.py`)도 함께 업데이트:
+```python
+# 변경 전
+assert captured["key"] == "chat:sid"
+
+# 변경 후
+assert captured["key"] == "memory:session:sid"
+```
+
+---
+
+### 문제 10: ExtProc 네임스페이스 불일치
+
+**증상**  
+팀원 레포의 `memory-extproc.yaml`은 `namespace: ai-gateway-system`을 사용하지만,  
+이 레포의 Redis는 `redis-system`, 애플리케이션 서비스는 `default`를 사용함.  
+그대로 적용하면 Redis 연결 실패 + 크로스 네임스페이스 ReferenceGrant 추가 필요.
+
+**해결**  
+ExtProc 배포를 `default` 네임스페이스로 통일, Redis 주소 수정:
+```yaml
+# k8s/06-extproc.yaml
+metadata:
+  namespace: default        # ai-gateway-system → default
+spec:
+  containers:
+    env:
+      - name: REDIS_HOST
+        value: redis.redis-system.svc.cluster.local  # 이 레포 Redis 위치
+```
+
+`EnvoyExtensionPolicy`도 동일 네임스페이스 → ReferenceGrant 불필요:
+```yaml
+# k8s/07-extproc-policy.yaml
+metadata:
+  namespace: default
+spec:
+  extProc:
+    - backendRefs:
+        - name: memory-extproc
+          namespace: default   # 동일 네임스페이스
+```
+
+---
+
 ## 5. 메모리 PoC 아키텍처 및 구현
 
-### 5.1 선택 방식: Option B
+### 5.1 최종 통합 아키텍처
 
-클라이언트 사이드 메모리 관리 방식을 선택했습니다.
+두 구현 방식(Option A, Option B)을 통합하여 각각의 강점을 결합했습니다.
 
-**선택 이유:**
-- ExtProc(gRPC) 개발 없이 Python REST API로 구현 가능
-- `AIServiceBackend.bodyMutation`으로 게이트웨이 레벨 파라미터 강제 적용 가능
-- 백엔드별 독립적인 정책 설정이 명확함
+| 구성 요소 | 출처 | 역할 |
+|-----------|------|------|
+| **ExtProc (server.py)** | Option A (팀원) | 게이트웨이 내 서버사이드 메모리: Redis 히스토리 조회·병합·저장 |
+| **BodyMutation** | Option B (본인) | 백엔드별 파라미터 강제: `stream=false`, `max_tokens`, 모델명 정규화 |
+| **토큰 레이트 리밋** | Option B (본인) | `x-tenant-id` 기준 입력/출력 토큰 버짓 |
+| **Memory Service REST API** | Option B (본인) | 세션 관리 전용: `/clear`, `/history`, `/system` 슬래시 명령어 지원 |
 
-**흐름:**
+**통합 요청 흐름:**
 ```
-1. 클라이언트 → Memory Service: GET /sessions/{id}  (히스토리 조회)
-2. 클라이언트가 history + new_message 로 messages 배열 구성
-3. 클라이언트 → AI Gateway: POST /v1/chat/completions
-      Header: x-ai-eg-model, x-session-id, x-tenant-id
-4. AI Gateway: BodyMutation 적용 (stream=false, max_tokens 강제)
-5. AI Gateway → LLM Backend (OpenRouter 또는 Ollama)
-6. 클라이언트 → Memory Service: POST /sessions/{id}/messages  (저장)
+클라이언트 (x-session-id 헤더만, 현재 메시지만 전송)
+  ↓
+Envoy AI Gateway
+  ↓ [1. ExtProc gRPC]
+     memory-extproc: Redis에서 history 조회 → current_msg와 병합
+                     → CONTINUE_AND_REPLACE (전체 messages 교체)
+  ↓ [2. AI Gateway BodyMutation]
+     stream=false, max_tokens 강제, ollama/ prefix 제거
+  ↓ [3. 토큰 레이트 리밋 체크]
+  ↓
+LLM Backend (OpenRouter / Ollama)
+  ↓
+Envoy AI Gateway
+  ↓ [4. ExtProc response_body]
+     assistant content 추출 → Redis 저장
+  ↓
+클라이언트 (응답 수신)
 ```
 
-### 5.2 v0.5 신규 기능 활용 지점
+**v1 (Option B) vs 통합 v2 비교:**
+
+| 항목 | v1 (Option B만) | v2 (통합) |
+|------|----------------|-----------|
+| 히스토리 조회 | 클라이언트가 매 요청 전 Memory Service 호출 | ExtProc이 Gateway 내부에서 자동 처리 |
+| messages 구성 | 클라이언트가 history + new_msg 직접 조립 | ExtProc이 서버사이드 병합 |
+| 응답 저장 | 클라이언트가 응답 후 Memory Service 호출 | ExtProc이 response_body에서 자동 저장 |
+| 클라이언트 복잡도 | 높음 (Memory Service 직접 관리) | 낮음 (헤더 1개만 추가) |
+
+### 5.2 ExtProc 구현 상세 (extproc/server.py)
+
+```python
+# Redis 키 형식: Memory Service REST API와 동일하게 유지 (상호운용)
+REDIS_KEY_PREFIX = "memory:session"
+
+# 요청 처리 단계
+# 1. request_headers: x-session-id 추출, Content-Length 제거
+# 2. request_body:
+#      history = redis.get(f"memory:session:{session_id}")
+#      merged = truncate(history + current_messages)
+#      → CONTINUE_AND_REPLACE: {**payload, "messages": merged}
+#      user 메시지를 Redis에 선저장
+# 3. response_body:
+#      end_of_stream 시 choices[0].message.content 추출
+#      → assistant 메시지 Redis 추가 저장
+```
+
+**장애 처리 정책:**
+
+| 상황 | 처리 방식 | 결과 |
+|------|-----------|------|
+| Redis 연결 실패 | fail-degraded | 히스토리 없이 계속 진행 (요청 차단 안 함) |
+| JSON 파싱 실패 | fail-open | 원본 body 그대로 전달 |
+| SSE 스트리밍 응답 | skip | assistant 저장 건너뜀 (PoC 한계) |
+| x-session-id 헤더 누락 | fail-closed | 400 즉시 반환 |
+
+**Dockerfile — 자체 완결 멀티스테이지 빌드:**
+```dockerfile
+# Stage 1: proto 컴파일 (git clone → grpcio-tools protoc)
+FROM python:3.12-slim AS proto-builder
+# envoy/api + cncf/xds(udpa) + bufbuild/pgv(validate) 클론
+# find ... | xargs python -m grpc_tools.protoc ...
+
+# Stage 2: 런타임
+FROM python:3.12-slim
+COPY --from=proto-builder /pb/ /app/proto/
+ENV PYTHONPATH=/app/proto
+```
+
+> ⚠️ 최초 빌드 시 proto 소스 클론 + 컴파일로 수분 소요.  
+> Docker 레이어 캐시 이후 재빌드는 빠름.
+
+### 5.3 K8s 리소스 구성
+
+```
+k8s/
+├── 02-gateway.yaml         GatewayConfig + Gateway (v0.5 NEW)
+├── 03-backends.yaml        AIServiceBackend + BodyMutation (OpenRouter/Ollama)
+├── 04-routes.yaml          AIGatewayRoute + BackendTrafficPolicy (토큰 레이트 리밋)
+├── 05-memory-service.yaml  Memory Service REST API (관리 명령어 전용)
+├── 06-extproc.yaml         Memory ExtProc Deployment + Service (gRPC :50051)
+└── 07-extproc-policy.yaml  EnvoyExtensionPolicy → Gateway 바인딩
+```
+
+**EnvoyExtensionPolicy 핵심 설정:**
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: memory-extproc-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-memory-poc       # 전체 트래픽에 적용
+  extProc:
+    - backendRefs:
+        - name: memory-extproc
+          namespace: default
+          port: 50051
+      processingMode:
+        request:
+          body: Buffered         # 전체 body 메모리에 적재 후 처리
+        response:
+          body: Streamed         # 청크 단위 수신, end_of_stream 시 저장
+```
+
+> **Gateway 타겟의 의미:** `kind: Gateway`를 타겟으로 설정하면  
+> Gateway를 통과하는 모든 트래픽(AIGatewayRoute 포함)에 ExtProc이 적용됩니다.
+
+### 5.4 v0.5 신규 기능 활용 지점
 
 **GatewayConfig (NEW)**
 ```yaml
@@ -600,7 +816,7 @@ rules:
       - name: openrouter
 ```
 
-### 5.3 Memory Service (Python FastAPI)
+### 5.5 Memory Service REST API (관리 전용, Python FastAPI)
 
 ```
 GET    /sessions/{id}            → 전체 히스토리 반환
@@ -651,22 +867,43 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 #   BodyMutation이 "ollama/" 접두사를 제거하여 llama3.2로 전달됨
 ```
 
-### 6.4 메모리 연속 대화 검증
+### 6.4 메모리 연속 대화 검증 (통합 아키텍처)
+
+통합 후 클라이언트는 현재 메시지만 전송, ExtProc이 서버사이드에서 자동 병합:
 
 ```
-Turn 1  히스토리 주입: 0개  →  "My name is Hong Gildong."
+Turn 1  클라이언트 전송: messages=[{user: "My name is Hong Gildong."}]
+        ExtProc: Redis 조회 → 빈 히스토리 → merged=1개 → LLM 전달
         LLM 응답: "Okay, Hong Gildong. I've got it!"
+        ExtProc: Redis에 user+assistant 저장 (총 2개)
 
-Turn 2  히스토리 주입: 2개  →  "What did I tell you my name was?"
+Turn 2  클라이언트 전송: messages=[{user: "What did I tell you my name was?"}]
+        ExtProc: Redis 조회 → 2개 히스토리 → merged=3개 → LLM 전달
         LLM 응답: "You told me your name was Hong Gildong."  ✅ 기억 성공
+        ExtProc: Redis에 추가 저장 (총 4개)
 
-Redis 저장: 4개 메시지 (user+assistant × 2턴)
+Redis 최종: 4개 메시지 (key: memory:session:{session_id})
 ```
 
-### 6.5 최종 클러스터 상태
+**v1 대비 클라이언트 변화:**
+```python
+# v1 (Option B): 클라이언트가 매 요청 전 히스토리 조회 + 병합
+history = fetch_history(session_id)          # Memory Service 호출
+messages = history + [{"role": "user", ...}] # 직접 조립
+# 응답 후
+save_message(session_id, "user", ...)        # Memory Service 저장
+save_message(session_id, "assistant", ...)   # Memory Service 저장
+
+# v2 (통합): 헤더 추가만 하면 됨
+headers["x-session-id"] = session_id        # ExtProc이 나머지 전담
+messages = [{"role": "user", "content": user_input}]  # 현재 메시지만
+```
+
+### 6.5 최종 클러스터 상태 (통합 후)
 
 ```
 NAMESPACE               POD                                        STATUS
+default                 memory-extproc-xxx                         Running  ← NEW
 default                 memory-service-xxx                         Running
 envoy-ai-gateway-system ai-gateway-controller-xxx                  Running
 envoy-gateway-system    envoy-default-ai-memory-poc-xxx            Running  (3/3)
@@ -681,30 +918,46 @@ redis-system            redis-xxx                                  Running
 
 ### 프로덕션 전환 전 확인 사항
 
+**v0.5 마이그레이션 공통**
 - [ ] CRD 설치 (`ai-gateway-crds-helm`) 배포 파이프라인에 포함 여부 확인
 - [ ] 모든 AI Gateway 리소스 `apiVersion`이 `v1alpha1`인지 검증
 - [ ] Redis 배포가 Envoy Gateway 설치보다 먼저 실행되는 순서 보장
 - [ ] `AIServiceBackend`에 `spec.timeouts` 필드가 없는지 확인
-- [ ] OpenRouter 무료 모델 대신 유료 모델 또는 fallback 구성 검토
 - [ ] `bodyMutation.set` 값 중 JSON 타입 문자열이 올바른지 확인
   - `"false"` (boolean) vs `'"false"'` (string)
   - `"1024"` (number) vs `'"1024"'` (string)
+
+**ExtProc (통합 아키텍처 추가)**
+- [ ] `memory-extproc` 이미지 빌드 — 최초 빌드 시 proto 컴파일로 수분 소요 (CI 타임아웃 여유분 확인)
+- [ ] `EnvoyExtensionPolicy` 타겟이 올바른 Gateway 이름을 가리키는지 확인
+- [ ] ExtProc 장애 시 fail-degraded 동작 검증: `memory-extproc` Pod 강제 종료 후 요청 통과 확인
+- [ ] SSE(`stream: true`) 응답이 필요한 경우 ExtProc 스트리밍 지원 구현 검토 (현재 PoC 한계)
+- [ ] `x-session-id` 헤더 누락 시 400 반환 — 클라이언트에 문서화 또는 헤더 자동 생성 정책 결정
+- [ ] Redis 키 형식 (`memory:session:{id}`) 변경 시 Memory Service와 동시 업데이트 필요
+- [ ] ExtProc replicas 스케일아웃 시 Redis 공유 세션 일관성 확인 (현재 stateless, 문제없음)
+
+**레이트 리밋 + 보안**
 - [ ] `x-tenant-id` 헤더 없는 요청에 대한 rate limit 정책 결정
 - [ ] Memory Service의 `SESSION_TTL_SECONDS` 값이 서비스 SLA에 맞는지 검토
+- [ ] OpenRouter 무료 모델 대신 유료 모델 또는 fallback 구성 검토
 - [ ] Kind → 실제 K8s 전환 시 Envoy 서비스 타입 `LoadBalancer` 확인
 - [ ] `BackendTLSPolicy` v1alpha3 deprecation 경고 → v1으로 업그레이드 예정 확인
+- [ ] Redis TLS 활성화 (`REDIS_TLS_ENABLED=true`, `redis-tls-ca` Secret 마운트)
 
 ### 후속 과제
 
 | 과제 | 우선순위 | 내용 |
 |------|----------|------|
+| SSE 스트리밍 지원 | High | ExtProc response_body에서 SSE 파싱 → assistant 청크 누적 저장 |
+| 단위 테스트 확대 | Medium | ExtProc gRPC iterator 통합 테스트 (현재 verify-*.sh에 의존) |
 | Long-term Memory | Medium | 세션 간 지속 저장, 사용자별 요약 |
 | Semantic Memory | Low | Redis Vector Search 연동 |
-| 성능 벤치마크 | Medium | 메모리 조회 레이턴시, 동시 요청 처리량 |
-| 프로덕션 배포 가이드 | High | EKS/GKE 환경 전환, TLS 설정 |
+| 성능 벤치마크 | Medium | ExtProc 레이턴시, 메모리 조회 오버헤드, 동시 요청 처리량 |
+| 프로덕션 배포 가이드 | High | EKS/GKE 환경 전환, TLS 설정, ExtProc HPA |
 | BackendTLSPolicy v1 마이그레이션 | Low | v1alpha3 → v1 업그레이드 |
 
 ---
 
 *이 가이드는 실제 구현 과정에서 발생한 문제와 해결책을 기반으로 작성되었습니다.*  
+*v1 (2026-04-26): Option B 단독 구현 | v2 (2026-04-27): Option A+B 통합*  
 *참조 레포지토리: [envoyproxy/ai-gateway](https://github.com/envoyproxy/ai-gateway)*
