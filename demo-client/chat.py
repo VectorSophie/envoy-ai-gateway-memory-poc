@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 AI Gateway Memory PoC - 인터랙티브 데모 클라이언트
-Option B: 클라이언트 사이드 메모리 관리
+통합 아키텍처 (Option A + B)
 
 흐름:
-  1. Memory Service에서 세션 히스토리 조회
-  2. 히스토리 + 새 메시지 → 전체 messages 배열 구성
-  3. AI Gateway로 POST (Body Mutation이 stream=false, max_tokens 강제 적용)
-  4. 응답을 Memory Service에 저장
+  1. AI Gateway로 POST (x-session-id 헤더 포함, 현재 메시지만)
+  2. Gateway 내 ExtProc이 Redis에서 히스토리 조회 → 자동 병합 (투명)
+  3. AI Gateway BodyMutation: stream=false, max_tokens 강제 적용
+  4. ExtProc이 assistant 응답을 Redis에 자동 저장
+
+  * Memory Service REST API는 /clear, /history, /system 관리 명령어에만 사용
+  * 클라이언트는 히스토리를 직접 관리하지 않음
 
 사용:
   python chat.py                           # 기본 (OpenRouter)
@@ -29,7 +32,7 @@ except ImportError:
     print("[Error] httpx가 없습니다. 설치: pip install httpx")
     sys.exit(1)
 
-# .env 파일 자동 로드 (demo-client/../.. 또는 직접 경로)
+# .env 파일 자동 로드
 def _load_env():
     candidates = [
         Path(__file__).parent.parent.parent / ".env",  # gateway/.env
@@ -51,7 +54,6 @@ MEMORY_URL = os.getenv("MEMORY_URL", "http://localhost:8081")
 
 BACKENDS = {
     "openrouter": {
-        # x-ai-eg-model 헤더 값 (라우팅 + OpenRouter body model 필드로 전달)
         "model": "google/gemma-3-4b-it:free",
         "display": "OpenRouter (google/gemma-3-4b-it:free)",
     },
@@ -63,9 +65,10 @@ BACKENDS = {
 }
 
 
-# ─── Memory Service 헬퍼 ──────────────────────────────────────────────────────
+# ─── Memory Service 헬퍼 (관리 명령어 전용) ───────────────────────────────────
 
 def fetch_history(session_id: str) -> list[dict]:
+    """히스토리 조회 (/history 슬래시 명령어용)."""
     try:
         r = httpx.get(f"{MEMORY_URL}/sessions/{session_id}", timeout=5)
         r.raise_for_status()
@@ -73,18 +76,6 @@ def fetch_history(session_id: str) -> list[dict]:
     except Exception as e:
         print(f"  ⚠ [Memory] 히스토리 조회 실패: {e}")
         return []
-
-
-def save_message(session_id: str, role: str, content: str) -> None:
-    try:
-        r = httpx.post(
-            f"{MEMORY_URL}/sessions/{session_id}/messages",
-            json={"role": role, "content": content},
-            timeout=5,
-        )
-        r.raise_for_status()
-    except Exception as e:
-        print(f"  ⚠ [Memory] 저장 실패: {e}")
 
 
 def clear_session(session_id: str) -> None:
@@ -112,24 +103,18 @@ def set_system_prompt(session_id: str, prompt: str) -> None:
 def chat(session_id: str, user_input: str, backend: str, tenant_id: str) -> str:
     model = BACKENDS[backend]["model"]
 
-    # Step 1: 히스토리 조회
-    print(f"\n  → [Memory] 세션 {session_id[:8]}... 히스토리 조회 중...")
-    history = fetch_history(session_id)
-    print(f"     {len(history)}개 메시지 로드됨")
-
-    # Step 2: 전체 messages 배열 구성 (Option B 핵심)
-    messages = history + [{"role": "user", "content": user_input}]
-
-    # Step 3: AI Gateway 호출
-    # Gateway가 BodyMutation으로 stream=false, max_tokens 강제 적용
-    print(f"  → [Gateway] {len(messages)}개 메시지 전송 (backend: {backend})")
-    payload = {"model": model, "messages": messages}
+    # Gateway ExtProc이 x-session-id 기반으로 Redis 히스토리를 자동 주입
+    # 클라이언트는 현재 메시지만 전송
+    payload = {"model": model, "messages": [{"role": "user", "content": user_input}]}
     headers = {
-        "x-ai-eg-model": model,       # 라우팅 결정에 사용
-        "x-session-id": session_id,   # 로깅/추적용
+        "x-ai-eg-model": model,       # 라우팅 결정
+        "x-session-id": session_id,   # ExtProc이 메모리 키로 사용
         "x-tenant-id": tenant_id,     # 토큰 레이트 리밋 버짓 키
         "Content-Type": "application/json",
     }
+
+    print(f"\n  → [ExtProc] 세션 {session_id[:8]}... 히스토리 자동 주입 (Gateway 내부)")
+    print(f"  → [Gateway] 전송 (backend: {backend})")
 
     try:
         resp = httpx.post(
@@ -149,12 +134,9 @@ def chat(session_id: str, user_input: str, backend: str, tenant_id: str) -> str:
     data = resp.json()
     assistant_content = data["choices"][0]["message"]["content"]
 
-    # Step 4: 양쪽 메시지 저장
-    save_message(session_id, "user", user_input)
-    save_message(session_id, "assistant", assistant_content)
-    print(f"  ✓ [Memory] 저장 완료 (총 {len(messages) + 1}개)")
+    # 저장은 ExtProc이 자동으로 처리 (클라이언트 불필요)
+    print(f"  ✓ [ExtProc] 저장 완료 (Gateway 내부 자동 처리)")
 
-    # 토큰 사용량 출력 (있을 경우)
     usage = data.get("usage", {})
     if usage:
         print(f"  ℹ [Tokens] in={usage.get('prompt_tokens',0)} "
@@ -169,16 +151,16 @@ def chat(session_id: str, user_input: str, backend: str, tenant_id: str) -> str:
 def print_banner(backend: str, session_id: str, tenant_id: str):
     print()
     print("=" * 65)
-    print("  AI Gateway Memory PoC — Option B")
-    print("  Body Mutation + External Memory Service")
+    print("  AI Gateway Memory PoC — 통합 (Option A + B)")
+    print("  ExtProc 서버사이드 메모리 + Body Mutation + 토큰 레이트 리밋")
     print("=" * 65)
     print(f"  백엔드  : {BACKENDS[backend]['display']}")
     print(f"  세션 ID : {session_id}")
     print(f"  테넌트  : {tenant_id}")
     print(f"  Gateway : {GATEWAY_URL}")
-    print(f"  Memory  : {MEMORY_URL}")
+    print(f"  Memory  : {MEMORY_URL}  (관리 명령어 전용)")
     print()
-    print("  명령어: /clear  /history  /system <prompt>  /quit")
+    print("  명령어: /clear  /history  /system <prompt>  /session  /quit")
     print("-" * 65)
 
 
@@ -225,7 +207,6 @@ def main():
         if not user_input:
             continue
 
-        # 슬래시 명령어 처리
         if user_input == "/quit":
             print("안녕히 가세요!")
             break
@@ -249,7 +230,6 @@ def main():
             print(f"  세션 ID: {session_id}")
             continue
 
-        # 일반 채팅
         response = chat(session_id, user_input, backend, tenant_id)
         print(f"\nAssistant: {response}")
 

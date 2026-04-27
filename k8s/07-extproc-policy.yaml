@@ -1,0 +1,33 @@
+# ── EnvoyExtensionPolicy: Memory ExtProc를 Gateway에 바인딩 ───────────────────
+#
+# Gateway를 타겟으로 설정 → ai-memory-poc를 통한 모든 트래픽에 ExtProc 적용
+# ExtProc 처리 순서:
+#   1. request_headers: x-session-id 추출, Content-Length 제거
+#   2. request_body: Redis 히스토리 조회 → 병합 → CONTINUE_AND_REPLACE
+#      (이후 AI Gateway BodyMutation: stream=false, max_tokens 적용)
+#   3. response_headers: SSE 감지
+#   4. response_body: assistant 응답 추출 → Redis 저장
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: memory-extproc-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-memory-poc
+  extProc:
+    - backendRefs:
+        - name: memory-extproc
+          namespace: default
+          port: 50051
+      processingMode:
+        request:
+          body: Buffered
+        response:
+          # Envoy Gateway v1.6 EnvoyExtensionPolicy는 response.headers 전달 미지원.
+          # SSE 감지는 response body 첫 chunk prefix로 판단 (server.py 참고).
+          body: Streamed

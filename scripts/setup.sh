@@ -115,13 +115,20 @@ helm upgrade -i aieg oci://docker.io/envoyproxy/ai-gateway-helm \
 
 success "AI Gateway 설치 완료"
 
-# ── Step 5: Memory Service Docker 이미지 빌드 + Kind 로드 ─────────────────────
+# ── Step 5: Docker 이미지 빌드 + Kind 로드 ───────────────────────────────────
 info "Step 5: Memory Service 이미지 빌드"
 
 docker build -t ai-gateway-memory-service:latest "$POC_DIR/memory-service/"
 kind load docker-image ai-gateway-memory-service:latest --name "$CLUSTER_NAME"
 
 success "Memory Service 이미지 Kind 클러스터에 로드 완료"
+
+info "Step 5b: Memory ExtProc 이미지 빌드 (proto 컴파일 포함, 최초 빌드 시 수분 소요)"
+
+docker build -t memory-extproc:latest "$POC_DIR/extproc/"
+kind load docker-image memory-extproc:latest --name "$CLUSTER_NAME"
+
+success "Memory ExtProc 이미지 Kind 클러스터에 로드 완료"
 
 # ── Step 6: K8s 매니페스트 적용 (순서 중요) ──────────────────────────────────
 info "Step 6: Gateway 매니페스트 적용"
@@ -136,8 +143,14 @@ sed "s/OPENROUTER_API_KEY_PLACEHOLDER/${OPENROUTER_API_KEY}/g" \
 # 6-3. 라우팅 규칙 + 토큰 레이트 리밋
 kubectl apply -f "$POC_DIR/k8s/04-routes.yaml"
 
-# 6-4. Memory Service
+# 6-4. Memory Service (REST API, 관리 명령어용)
 kubectl apply -f "$POC_DIR/k8s/05-memory-service.yaml"
+
+# 6-5. Memory ExtProc (gRPC, 게이트웨이 서버사이드 메모리)
+kubectl apply -f "$POC_DIR/k8s/06-extproc.yaml"
+
+# 6-6. EnvoyExtensionPolicy (ExtProc ↔ Gateway 바인딩)
+kubectl apply -f "$POC_DIR/k8s/07-extproc-policy.yaml"
 
 success "매니페스트 적용 완료"
 
@@ -145,6 +158,9 @@ success "매니페스트 적용 완료"
 info "Step 7: Pod 준비 대기..."
 
 kubectl wait --for=condition=available deployment/memory-service \
+    -n default --timeout=120s
+
+kubectl wait --for=condition=available deployment/memory-extproc \
     -n default --timeout=120s
 
 # Envoy Gateway가 Gateway 리소스에서 Envoy Proxy 파드를 생성할 때까지 대기

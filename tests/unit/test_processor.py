@@ -1,10 +1,11 @@
-"""Unit tests for server.py refactoring (Day 3-4).
+"""Unit tests for extproc/server.py
 
-Focus: pure helpers and JSON handling. gRPC iterator 통합 테스트는 Day 7 verify-*.sh에서 커버.
+Focus: pure helpers and JSON handling.
+gRPC iterator 통합 테스트는 scripts/verify-step4.sh에서 커버.
 
-Run (WSL):
-    cd /home/bonjour/memory-extproc
-    ./.venv/bin/pytest tests/unit -v
+Run:
+    pip install pytest redis
+    pytest tests/unit -v
 """
 import json
 import os
@@ -12,9 +13,15 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# extproc/server.py를 import
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "extproc",
+    ),
+)
 
-# MAX_HISTORY_LENGTH 기본값 사용
 import server  # noqa: E402
 
 
@@ -212,7 +219,7 @@ def test_extract_assistant_content_invalid_json_returns_none():
     ],
 )
 def test_sse_body_prefix_detection(first_bytes, should_detect_sse):
-    """response_body 첫 chunk의 prefix 기반 SSE 감지 로직을 고정."""
+    """response_body 첫 chunk의 prefix 기반 SSE 감지 로직."""
     detected = any(
         first_bytes.startswith(p) for p in (b"data:", b"event:", b"id:")
     )
@@ -251,6 +258,7 @@ def test_redis_save_history_serializes_non_ascii(monkeypatch):
 
     monkeypatch.setattr(server, "r", RecordingRedis())
     assert server._redis_save_history("sid", [{"role": "user", "content": "홍길동"}]) is True
-    assert captured["key"] == "chat:sid"
+    # Redis 키 형식: memory:session:{session_id} (Memory Service REST API와 동일)
+    assert captured["key"] == "memory:session:sid"
     parsed = json.loads(captured["value"])
     assert parsed[0]["content"] == "홍길동"
