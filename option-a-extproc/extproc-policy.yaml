@@ -1,0 +1,42 @@
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-default-envoyextensionpolicy-to-memory-extproc
+  namespace: ai-gateway-system
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: EnvoyExtensionPolicy
+      namespace: default
+  to:
+    - group: ""
+      kind: Service
+      name: memory-extproc
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: ext-proc-memory-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: test-route
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: ai-route-openai
+  extProc:
+    - backendRefs:
+        - name: memory-extproc
+          namespace: ai-gateway-system
+          port: 50051
+      processingMode:
+        request:
+          body: Buffered
+        response:
+          # Envoy Gateway v1.6 EnvoyExtensionPolicy CRD는 processingMode.response.headers 필드를
+          # 노출하지 않는다(kubectl explain 확인). 따라서 SSE 감지는 response body의 첫 chunk
+          # prefix(`data: ` / `id: ` / `event: `)로 판단한다. 해당 로직은 server.py response_body
+          # 핸들러 참조.
+          body: Streamed

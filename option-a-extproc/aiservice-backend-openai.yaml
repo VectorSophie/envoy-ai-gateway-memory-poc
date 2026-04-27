@@ -1,0 +1,32 @@
+---
+# Envoy Gateway Backend — mock-llm-backend Service FQDN을 래핑.
+# AIServiceBackend는 raw K8s Service 대신 이 Backend CRD만 참조할 수 있다.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: mock-llm-backend-eg
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: mock-llm-backend.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: ai-service-openai-via-mock
+  namespace: default
+spec:
+  schema:
+    # v0.5 공식 provider schema. "OpenAI"를 선언하면 AI Gateway가 path/header 변환을
+    # OpenAI chat completions 규격으로 관리한다. (docs/migration-v04-to-v05.md §3 schema.prefix 대응)
+    name: OpenAI
+  backendRef:
+    # Plan C — 외부 provider(OpenRouter 등) 직결 대신 Envoy Gateway Backend로
+    # mock-llm-backend를 감싸 공식 경로 구조만 먼저 검증한다.
+    # 공식 AIGatewayRoute 경로의 200 OK, merged messages, assistant 저장을 검증한다.
+    # semantic 검증은 debug.local + OpenRouter proxy(Phase 2-A)가 담당한다.
+    name: mock-llm-backend-eg
+    kind: Backend
+    group: gateway.envoyproxy.io

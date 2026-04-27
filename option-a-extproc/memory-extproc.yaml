@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-extproc
+  namespace: ai-gateway-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memory-extproc
+  template:
+    metadata:
+      labels:
+        app: memory-extproc
+    spec:
+      containers:
+        - name: memory-extproc
+          image: memory-extproc:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+          volumeMounts:
+            - name: redis-tls-ca
+              mountPath: /etc/redis-tls
+              readOnly: true
+          env:
+            - name: REDIS_HOST
+              value: redis-master.ai-gateway-system.svc.cluster.local
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis
+                  key: redis-password
+            - name: MEMORY_TTL_SECONDS
+              value: "3600"
+            - name: MAX_HISTORY_LENGTH
+              value: "20"
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+            - name: REDIS_TLS_CA_CERT_PATH
+              value: /etc/redis-tls/ca.crt
+            - name: REDIS_TLS_CHECK_HOSTNAME
+              value: "true"
+      volumes:
+        - name: redis-tls-ca
+          secret:
+            secretName: redis-tls-ca
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memory-extproc
+  namespace: ai-gateway-system
+spec:
+  selector:
+    app: memory-extproc
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+  type: ClusterIP

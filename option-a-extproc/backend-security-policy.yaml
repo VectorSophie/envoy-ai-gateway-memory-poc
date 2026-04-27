@@ -1,0 +1,15 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: BackendSecurityPolicy
+metadata:
+  name: openrouter-api-key-policy
+  namespace: default
+spec:
+  type: APIKey
+  apiKey:
+    secretRef:
+      name: openrouter-secret
+      kind: Secret
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: ai-service-openai-via-mock

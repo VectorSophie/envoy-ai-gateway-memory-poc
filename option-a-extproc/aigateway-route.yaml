@@ -1,0 +1,14 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: ai-route-openai
+  namespace: default
+spec:
+  parentRefs:
+    - name: ai-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - backendRefs:
+        - name: ai-service-openai-via-mock
+          # AIServiceBackend 참조 (group default: aigateway.envoyproxy.io)
