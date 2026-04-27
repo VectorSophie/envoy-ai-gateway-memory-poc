@@ -1,0 +1,136 @@
+# ── AI 백엔드 정의 ────────────────────────────────────────────────────────────
+#
+# 백엔드:
+#   1. openrouter  - OpenRouter (클라우드, OpenAI 호환, TLS)
+#   2. ollama      - Ollama (로컬, host.docker.internal:11434)
+#
+# [v0.5] BodyMutation: 백엔드별 파라미터 강제 적용
+#   - stream: false  (PoC에서 스트리밍 비활성화)
+#   - max_tokens     (백엔드별 상한 설정)
+#   - model          (Ollama: x-ai-eg-model 헤더의 "ollama/" 접두사 제거)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── OpenRouter ────────────────────────────────────────────────────────────────
+
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: openrouter
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: openrouter.ai
+        port: 443
+
+---
+# OpenRouter은 /api/v1/chat/completions 경로 사용
+# [v0.5 NEW] schema.prefix: OpenAI 호환 비표준 경로 접두사 지원
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: openrouter
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+    prefix: "api/v1"   # → /api/v1/chat/completions
+  backendRef:
+    name: openrouter
+    kind: Backend
+    group: gateway.envoyproxy.io
+  # [v0.5] BodyMutation: 게이트웨이 레벨에서 파라미터 강제 적용
+  bodyMutation:
+    set:
+      - path: "stream"
+        value: "false"
+      - path: "max_tokens"
+        value: "2048"
+
+---
+# OpenRouter TLS 정책
+apiVersion: gateway.networking.k8s.io/v1alpha3
+kind: BackendTLSPolicy
+metadata:
+  name: openrouter-tls
+  namespace: default
+spec:
+  targetRefs:
+    - group: "gateway.envoyproxy.io"
+      kind: Backend
+      name: openrouter
+  validation:
+    wellKnownCACertificates: "System"
+    hostname: openrouter.ai
+
+---
+# OpenRouter API 키 (setup.sh가 실제 키로 치환)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openrouter-apikey
+  namespace: default
+type: Opaque
+stringData:
+  apiKey: OPENROUTER_API_KEY_PLACEHOLDER
+
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: BackendSecurityPolicy
+metadata:
+  name: openrouter-apikey
+  namespace: default
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: openrouter
+  type: APIKey
+  apiKey:
+    secretRef:
+      name: openrouter-apikey
+      namespace: default
+
+# ── Ollama (로컬) ──────────────────────────────────────────────────────────────
+
+---
+# Docker Desktop에서 host.docker.internal → 호스트 머신
+# Ollama가 호스트에서 11434 포트로 실행 중이어야 함
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: ollama
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: host.docker.internal
+        port: 11434
+
+---
+# Ollama는 표준 /v1/chat/completions 경로 → prefix 불필요
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: ollama
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+    # prefix 미설정 → 기본값 "v1" 적용 → /v1/chat/completions
+  backendRef:
+    name: ollama
+    kind: Backend
+    group: gateway.envoyproxy.io
+  # [v0.5] BodyMutation:
+  #   - model: "ollama/llama3.2" → "llama3.2" (헤더 접두사 제거)
+  #   - stream 비활성화
+  bodyMutation:
+    set:
+      - path: "model"
+        value: '"llama3.2"'
+      - path: "stream"
+        value: "false"
+      - path: "max_tokens"
+        value: "1024"

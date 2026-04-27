@@ -1,0 +1,23 @@
+# Envoy Gateway Rate Limit 설정 (token_ratelimit 예제에서 가져옴)
+# Redis를 전역 레이트 리밋 백엔드로 사용
+# Envoy Gateway Helm 설치 시 -f 옵션으로 병합됨
+
+config:
+  envoyGateway:
+    provider:
+      kubernetes:
+        rateLimitDeployment:
+          patch:
+            type: StrategicMerge
+            value:
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - imagePullPolicy: IfNotPresent
+                        name: envoy-ratelimit
+    rateLimit:
+      backend:
+        type: Redis
+        redis:
+          url: redis.redis-system.svc.cluster.local:6379

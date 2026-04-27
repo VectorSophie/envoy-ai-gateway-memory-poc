@@ -1,0 +1,86 @@
+# ── AI Gateway v0.5 core infrastructure ──────────────────────────────────────
+#
+# v0.5 변경사항 적용:
+#   - GatewayConfig CRD (NEW): ExtProc 리소스 설정
+#   - schema.prefix (NEW): OpenRouter, Ollama 경로 접두사
+#   - filterConfig.externalProcessor.resources → GatewayConfig 로 마이그레이션
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ai-memory-poc
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+---
+# [v0.5 NEW] GatewayConfig CRD
+# v0.4의 filterConfig.externalProcessor.resources 대체
+# Gateway 어노테이션으로 참조됨
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: GatewayConfig
+metadata:
+  name: memory-poc-config
+  namespace: default
+spec:
+  extProc:
+    kubernetes:
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ai-memory-poc
+  namespace: default
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          # PoC 환경: 리소스 제한 최소화
+          resources: {}
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-memory-poc
+  namespace: default
+  annotations:
+    # [v0.5 NEW] GatewayConfig 참조
+    aigateway.envoyproxy.io/gateway-config: memory-poc-config
+spec:
+  gatewayClassName: ai-memory-poc
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: ai-memory-poc
+
+---
+# LLM 응답 크기 때문에 기본 32KiB 버퍼로는 부족 → 50MiB로 확장
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: ai-memory-poc-buffer
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-memory-poc
+  connection:
+    bufferLimit: 50Mi

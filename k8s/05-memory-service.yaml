@@ -1,0 +1,71 @@
+# ── Memory Service K8s 배포 ───────────────────────────────────────────────────
+#
+# Option B 아키텍처의 핵심 컴포넌트:
+#   - Python FastAPI 서버
+#   - Redis (redis-system)에 세션별 대화 히스토리 저장
+#   - 클라이언트가 히스토리를 조회 → AI Gateway 호출 전 messages 배열 구성
+#
+# NodePort 30081 → 호스트 8081 (kind-config extraPortMappings)
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-service
+  namespace: default
+  labels:
+    app: memory-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memory-service
+  template:
+    metadata:
+      labels:
+        app: memory-service
+    spec:
+      containers:
+        - name: memory-service
+          image: ai-gateway-memory-service:latest
+          # Kind에 직접 로드한 이미지 사용 (레지스트리 풀 없음)
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: REDIS_URL
+              value: "redis://redis.redis-system.svc.cluster.local:6379"
+            - name: MAX_HISTORY_LENGTH
+              value: "20"
+            - name: SESSION_TTL_SECONDS
+              value: "3600"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memory-service
+  namespace: default
+  labels:
+    app: memory-service
+spec:
+  selector:
+    app: memory-service
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

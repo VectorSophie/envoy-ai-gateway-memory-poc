@@ -1,0 +1,130 @@
+# ── 라우팅 규칙 + 토큰 레이트 리밋 ────────────────────────────────────────────
+#
+# token_ratelimit 예제 기반 확장:
+#   - llmRequestCosts: 토큰 사용량 메타데이터 수집
+#   - BackendTrafficPolicy: x-tenant-id 기준 시간당 토큰 버짓
+#
+# 라우팅:
+#   x-ai-eg-model: ollama/.* → Ollama 백엔드 (RegularExpression)
+#   x-ai-eg-model: .*        → OpenRouter 백엔드 (기본)
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: ai-memory-poc
+  namespace: default
+spec:
+  parentRefs:
+    - name: ai-memory-poc
+      kind: Gateway
+      group: gateway.networking.k8s.io
+
+  rules:
+    # Rule 1: Ollama 로컬 백엔드
+    # x-ai-eg-model: ollama/* 패턴 → Ollama
+    - matches:
+        - headers:
+            - type: RegularExpression
+              name: x-ai-eg-model
+              value: "ollama/.*"
+      backendRefs:
+        - name: ollama
+      timeouts:
+        request: 120s
+
+    # Rule 2: OpenRouter (기본) 백엔드
+    # x-ai-eg-model이 있는 모든 요청 → OpenRouter
+    - matches:
+        - headers:
+            - type: RegularExpression
+              name: x-ai-eg-model
+              value: ".*"
+      backendRefs:
+        - name: openrouter
+      timeouts:
+        request: 120s
+
+  # token_ratelimit 예제에서 가져온 토큰 비용 메타데이터 수집
+  # BackendTrafficPolicy의 rateLimit.global.rules[].cost.response.from 에서 참조
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_cached_input_token
+      type: CachedInputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
+    - metadataKey: llm_total_token
+      type: TotalToken
+
+---
+# token_ratelimit 예제 기반 토큰 레이트 리밋
+# x-tenant-id 헤더 기준 사용자별 버짓 적용
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: ai-memory-poc-ratelimit
+  namespace: default
+spec:
+  targetRefs:
+    - name: ai-memory-poc
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        # 입력 토큰 버짓: 테넌트당 시간당 50,000 토큰
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 50000
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0        # 요청 시 버짓 미소모 (응답에서 집계)
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_input_token
+
+        # 출력 토큰 버짓: 테넌트당 시간당 25,000 토큰
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 25000
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_output_token
+
+        # 총 토큰 버짓: 테넌트당 시간당 100,000 토큰
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 100000
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_total_token
