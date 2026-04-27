@@ -50,15 +50,15 @@ choco install kind kubernetes-helm -y
 
 ### 2.1 CRD API 버전 — **가장 중요**
 
-> ⚠️ **v0.5.0 실제 확인**: 문서에는 `v1beta1`으로 기술되어 있으나,  
+>  **v0.5.0 실제 확인**: 문서에는 `v1beta1`으로 기술되어 있으나,  
 > **실제 배포된 Helm 차트의 모든 AI Gateway CRD는 `v1alpha1`입니다.**
 
 ```yaml
-# ❌ 잘못된 표기 (문서 기준)
+#  잘못된 표기 (문서 기준)
 apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 
-# ✅ 실제 동작하는 표기 (v0.5.0 Helm 기준)
+#  실제 동작하는 표기 (v0.5.0 Helm 기준)
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 ```
@@ -87,10 +87,10 @@ v0.5부터 AI Gateway CRD가 **별도 Helm 차트**로 분리되었습니다.
 메인 차트보다 **반드시 먼저** 설치해야 합니다.
 
 ```bash
-# ❌ v0.4 방식 (CRD가 메인 차트에 포함)
+#  v0.4 방식 (CRD가 메인 차트에 포함)
 helm install aieg oci://docker.io/envoyproxy/ai-gateway-helm --version v0.4.x
 
-# ✅ v0.5 방식 (CRD 차트 선설치 필수)
+#  v0.5 방식 (CRD 차트 선설치 필수)
 helm install aieg-crds oci://docker.io/envoyproxy/ai-gateway-crds-helm \
   --version v0.5.0 -n envoy-ai-gateway-system --create-namespace
 
@@ -109,7 +109,7 @@ helm install aieg oci://docker.io/envoyproxy/ai-gateway-helm \
 v0.4의 `filterConfig.externalProcessor.resources`가 `GatewayConfig` CRD로 대체됩니다.
 
 ```yaml
-# ❌ v0.4 방식 (DEPRECATED, v0.6에서 제거 예정)
+#  v0.4 방식 (DEPRECATED, v0.6에서 제거 예정)
 spec:
   filterConfig:
     externalProcessor:
@@ -117,7 +117,7 @@ spec:
         limits:
           memory: "512Mi"
 
-# ✅ v0.5 방식
+#  v0.5 방식
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: GatewayConfig
 metadata:
@@ -148,13 +148,13 @@ metadata:
 OpenAI 호환 비표준 경로를 가진 백엔드(OpenRouter 등)를 위한 신규 필드.
 
 ```yaml
-# ❌ v0.4 방식
+#  v0.4 방식
 spec:
   schema:
     name: OpenAI
     version: "api/v1"   # version 필드 오용
 
-# ✅ v0.5 방식
+#  v0.5 방식
 spec:
   schema:
     name: OpenAI
@@ -166,14 +166,14 @@ spec:
 ### 2.5 AIServiceBackend에서 제거된 필드
 
 ```yaml
-# ❌ v1alpha1에서 동작하지 않음 (strict decoding error)
+#  v1alpha1에서 동작하지 않음 (strict decoding error)
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIServiceBackend
 spec:
   timeouts:          # ← 제거됨
     request: 120s
 
-# ✅ timeouts는 AIGatewayRoute rule 레벨에서만 지정
+#  timeouts는 AIGatewayRoute rule 레벨에서만 지정
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 spec:
@@ -208,7 +208,7 @@ kind create cluster \
 
 ### Step 2: Redis 배포 — Envoy Gateway보다 먼저
 
-> ⚠️ **순서 중요**: Envoy Gateway의 rate limit 서비스가 Redis에 의존하므로  
+>  **순서 중요**: Envoy Gateway의 rate limit 서비스가 Redis에 의존하므로  
 > **반드시 Redis를 먼저** 배포해야 합니다.
 
 ```bash
@@ -298,51 +298,7 @@ kubectl port-forward -n default svc/memory-service 8081:8080 &
 
 ## 4. 실제 겪은 문제와 해결책
 
-### 문제 1: Docker Desktop WSL2 통합 오류
-
-**증상**
-```
-WSL integration with distro 'Ubuntu' unexpectedly stopped.
-execvpe(/mnt/wsl/docker-desktop/docker-desktop-user-distro) failed: Permission denied
-```
-
-**원인**  
-WSL2 업데이트 또는 재시작 후 Docker Desktop의 WSL 마운트 권한이 초기화되는 버그.
-
-**해결**
-```powershell
-# 관리자 PowerShell
-wsl --shutdown
-# 이후 Docker Desktop 트레이 우클릭 → Restart Docker Desktop
-```
-
-**예방**  
-Docker Desktop 재시작 순서: 반드시 WSL 종료(`wsl --shutdown`) → Docker Desktop 시작.
-
----
-
-### 문제 2: Git Bash에서 Docker 파이프 연결 실패
-
-**증상**
-```
-failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine
-```
-
-**원인**  
-Docker Desktop이 `desktop-linux` 컨텍스트(WSL2 백엔드)를 기본으로 사용할 때,  
-Git Bash(MinGW)에서 Windows 명명 파이프 경로 해석이 PowerShell과 다름.
-
-**해결**  
-PowerShell에서 docker 명령 실행하거나, WSL 재시작 후 컨텍스트 재설정:
-```bash
-docker context use desktop-linux
-# 또는 PowerShell에서 실행
-powershell.exe -Command "docker ps"
-```
-
----
-
-### 문제 3: AI Gateway CRDs 미설치로 CrashLoopBackOff
+### 문제 1: AI Gateway CRDs 미설치로 CrashLoopBackOff
 
 **증상**
 ```
@@ -375,7 +331,7 @@ kubectl rollout status deployment/ai-gateway-controller \
 
 ---
 
-### 문제 4: GatewayConfig apiVersion 불일치
+### 문제 2: GatewayConfig apiVersion 불일치
 
 **증상**
 ```
@@ -406,7 +362,7 @@ sed -i 's|aigateway.envoyproxy.io/v1beta1|aigateway.envoyproxy.io/v1alpha1|g' \
 
 ---
 
-### 문제 5: AIServiceBackend의 spec.timeouts 필드 오류
+### 문제 3: AIServiceBackend의 spec.timeouts 필드 오류
 
 **증상**
 ```
@@ -423,14 +379,14 @@ strict decoding error: unknown field "spec.timeouts"
 `AIServiceBackend`에서 `timeouts` 제거, `AIGatewayRoute` 규칙 레벨로 이동:
 
 ```yaml
-# ❌ 오류
+#  오류
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIServiceBackend
 spec:
   timeouts:
     request: 120s
 
-# ✅ 올바른 위치
+#  올바른 위치
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 spec:
@@ -443,31 +399,7 @@ spec:
 
 ---
 
-### 문제 6: OpenRouter 무료 모델 404 오류
-
-**증상**
-```json
-{"error": {"message": "No endpoints found for meta-llama/llama-3.3-8b-instruct:free.", "code": 404}}
-```
-
-**원인**  
-계획한 모델(`meta-llama/llama-3.3-8b-instruct:free`)이 OpenRouter에서 제공 종료됨.
-
-**해결**  
-사용 가능한 무료 모델로 교체. 검증된 모델:
-
-| 모델 | 상태 | 비고 |
-|------|------|------|
-| `google/gemma-3-4b-it:free` | ✅ 동작 | 권장 |
-| `meta-llama/llama-3.2-3b-instruct:free` | ⚠️ Rate limit | 업스트림 제한 |
-| `meta-llama/llama-3.3-8b-instruct:free` | ❌ 404 | 서비스 종료 |
-
-> **교훈**: 무료 모델은 가용성이 수시로 변경됩니다.  
-> 프로덕션에서는 특정 모델에 의존하지 말고 fallback 구성(`provider_fallback` 예제 참고)을 권장.
-
----
-
-### 문제 7: Redis 배포 순서 오류
+### 문제 4: Redis 배포 순서 오류
 
 **증상**  
 Envoy Gateway rate limit 서비스가 Redis에 연결하지 못해 초기화 실패.
@@ -488,7 +420,7 @@ Redis가 준비되기 전에 Envoy Gateway를 설치하면 rate limit 서비스�
 
 ---
 
-### 문제 8: ExtProc 이미지 빌드 — Envoy proto 컴파일 의존성
+### 문제 5: ExtProc 이미지 빌드 — Envoy proto 컴파일 의존성
 
 **증상**  
 팀원 레포의 Dockerfile이 `COPY envoy/api /app/envoy/api`를 하지만, 해당 디렉토리가 `.gitignore`에 포함되어 레포에 없음:
@@ -521,7 +453,7 @@ COPY --from=proto-builder /pb/ /app/proto/
 ENV PYTHONPATH=/app/proto
 ```
 
-> ⚠️ **3개 레포를 클론해야 하는 이유**: `external_processor.proto`의 transitive import가  
+>  **3개 레포를 클론해야 하는 이유**: `external_processor.proto`의 transitive import가  
 > `udpa/annotations/status.proto` (cncf/xds 레포)와 `validate/validate.proto` (bufbuild 레포)를 포함.  
 > `grpcio-tools`는 google/protobuf 만 자동 제공, 나머지는 별도 `-I` 경로 지정 필요.
 
@@ -679,7 +611,7 @@ COPY --from=proto-builder /pb/ /app/proto/
 ENV PYTHONPATH=/app/proto
 ```
 
-> ⚠️ 최초 빌드 시 proto 소스 클론 + 컴파일로 수분 소요.  
+>  최초 빌드 시 proto 소스 클론 + 컴파일로 수분 소요.  
 > Docker 레이어 캐시 이후 재빌드는 빠름.
 
 ### 5.3 K8s 리소스 구성
@@ -879,7 +811,7 @@ Turn 1  클라이언트 전송: messages=[{user: "My name is Hong Gildong."}]
 
 Turn 2  클라이언트 전송: messages=[{user: "What did I tell you my name was?"}]
         ExtProc: Redis 조회 → 2개 히스토리 → merged=3개 → LLM 전달
-        LLM 응답: "You told me your name was Hong Gildong."  ✅ 기억 성공
+        LLM 응답: "You told me your name was Hong Gildong."   기억 성공
         ExtProc: Redis에 추가 저장 (총 4개)
 
 Redis 최종: 4개 메시지 (key: memory:session:{session_id})
