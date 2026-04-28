@@ -157,39 +157,39 @@ flowchart TD
 
     PHASE -->|request_headers| RH_EXTRACT[x-session-id 헤더 추출]
     RH_EXTRACT --> RH_CHECK{세션 ID 있음?}
-    RH_CHECK -->|없음| RH_FAIL[즉시 응답\n400 Bad Request\nfail-closed]
-    RH_CHECK -->|있음| RH_STORE[세션 ID 저장\nContent-Type 저장]
+    RH_CHECK -->|없음| RH_FAIL[즉시 응답<br/>400 Bad Request<br/>fail-closed]
+    RH_CHECK -->|있음| RH_STORE[세션 ID 저장<br/>Content-Type 저장]
     RH_STORE --> RH_CONT([CONTINUE])
 
     PHASE -->|request_body| RB_PARSE[JSON body 파싱]
     RB_PARSE --> RB_CHECK{파싱 성공?}
-    RB_CHECK -->|실패| RB_PASS([원본 body 통과\nfail-open])
-    RB_CHECK -->|성공| RB_REDIS[Redis 히스토리 조회\nGET memory:session:{id}]
+    RB_CHECK -->|실패| RB_PASS([원본 body 통과<br/>fail-open])
+    RB_CHECK -->|성공| RB_REDIS["Redis 히스토리 조회<br/>GET memory:session:{id}"]
     RB_REDIS --> RB_REDIS_CHK{Redis 응답?}
-    RB_REDIS_CHK -->|RedisError| RB_DEGRADE[히스토리 없이 계속\nfail-degraded\n카운터 증가]
+    RB_REDIS_CHK -->|RedisError| RB_DEGRADE[히스토리 없이 계속<br/>fail-degraded<br/>카운터 증가]
     RB_REDIS_CHK -->|nil 새 세션| RB_EMPTY[빈 히스토리]
-    RB_REDIS_CHK -->|JSON 데이터| RB_DECODE[히스토리 파싱\n유효성 검증]
+    RB_REDIS_CHK -->|JSON 데이터| RB_DECODE[히스토리 파싱<br/>유효성 검증]
     RB_DECODE --> RB_MERGE
     RB_EMPTY --> RB_MERGE
     RB_DEGRADE --> RB_MERGE
-    RB_MERGE[히스토리 + 현재 메시지 병합] --> RB_TRIM[MAX_HISTORY_LENGTH 트리밍\n최신 N개 유지]
-    RB_TRIM --> RB_REPLACE([body 교체\nCONTINUE_AND_REPLACE])
+    RB_MERGE[히스토리 + 현재 메시지 병합] --> RB_TRIM[MAX_HISTORY_LENGTH 트리밍<br/>최신 N개 유지]
+    RB_TRIM --> RB_REPLACE([body 교체<br/>CONTINUE_AND_REPLACE])
 
-    PHASE -->|response_headers| RSP_HDR[Content-Type 저장\nSSE 여부 플래그]
+    PHASE -->|response_headers| RSP_HDR[Content-Type 저장<br/>SSE 여부 플래그]
     RSP_HDR --> RSP_CONT([CONTINUE])
 
-    PHASE -->|response_body| RSP_SSE{Content-Type 또는\nbody prefix가 SSE?}
-    RSP_SSE -->|data: / event: / id:| SSE_SKIP([스트리밍 pass-through\n저장 스킵])
+    PHASE -->|response_body| RSP_SSE{Content-Type 또는<br/>body prefix가 SSE?}
+    RSP_SSE -->|data: / event: / id:| SSE_SKIP([스트리밍 pass-through<br/>저장 스킵])
     RSP_SSE -->|아니오| RSP_PARSE[JSON 파싱]
-    RSP_PARSE --> RSP_EXTRACT[choices 순회\nassistant role 추출]
-    RSP_EXTRACT --> RSP_FOUND{assistant content\n있음?}
-    RSP_FOUND -->|없음| RSP_SKIP([저장 스킵 CONTINUE])
+    RSP_PARSE --> RSP_EXTRACT[choices 순회<br/>assistant role 추출]
+    RSP_EXTRACT --> RSP_FOUND{assistant content<br/>있음?}
+    RSP_FOUND -->|없음| RSP_SKIP([저장 스킵<br/>CONTINUE])
     RSP_FOUND -->|있음| RSP_APPEND[히스토리에 assistant 메시지 추가]
-    RSP_APPEND --> RSP_SAVE[Redis SETEX\nTTL: 3600s]
+    RSP_APPEND --> RSP_SAVE[Redis SETEX<br/>TTL: 3600s]
     RSP_SAVE --> RSP_REDIS_CHK{저장 성공?}
-    RSP_REDIS_CHK -->|실패| RSP_WARN[경고 로그\n카운터 증가]
-    RSP_REDIS_CHK -->|성공| RSP_OK
-    RSP_WARN --> RSP_OK([CONTINUE])
+    RSP_REDIS_CHK -->|실패| RSP_WARN[경고 로그<br/>카운터 증가]
+    RSP_REDIS_CHK -->|성공| RSP_OK([CONTINUE])
+    RSP_WARN --> RSP_OK
 
     style RH_FAIL fill:#ffcdd2,stroke:#f44336
     style RB_PASS fill:#fff9c4,stroke:#fbc02d
